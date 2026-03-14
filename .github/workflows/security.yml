@@ -57,7 +57,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Audit production dependencies
-        run: pnpm audit -r --prod --audit-level high
+        run: pnpm -r exec pnpm audit --prod --audit-level high
 
   python-audit:
     name: Python audit
