@@ -1,0 +1,20 @@
+[project]
+name = "codex-replay-api"
+version = "0.1.0"
+description = "Local-first replay API for Codex traces"
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi>=0.115.0,<1.0.0",
+  "python-multipart>=0.0.9",
+  "uvicorn>=0.34.0,<1.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28.0,<1.0.0",
+  "pytest>=8.3.0,<9.0.0"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["services/api"]
