@@ -1,6 +1,6 @@
 <div align="center">
   <img src="./.github/assets/codex-replay-hero.svg" alt="codex-replay ledger board preview" width="100%" />
-  <h1>codex-replay</h1>
+  <h1>Codex Replay</h1>
   <p><strong>Replay what your coding agent actually did.</strong></p>
   <p>Local-first trace discovery, evidence-first replay, deterministic review signals, and round-trip export bundles for Codex sessions.</p>
 
@@ -79,12 +79,12 @@ Rollout artifacts are imported automatically. Session-index rows remain metadata
 
 ## Architecture
 
-| Area | Role |
-| --- | --- |
-| `apps/web` | Next.js 15 frontend for landing, catalog, and replay inspector |
+| Area           | Role                                                                       |
+| -------------- | -------------------------------------------------------------------------- |
+| `apps/web`     | Next.js 15 frontend for landing, catalog, and replay inspector             |
 | `services/api` | FastAPI service for discovery, import, normalization, insights, and export |
-| `data/` | Managed SQLite database, copied artifacts, blobs, and exported bundles |
-| `scripts/ci` | Shared smoke, hygiene, and release packaging logic |
+| `data/`        | Managed SQLite database, copied artifacts, blobs, and exported bundles     |
+| `scripts/ci`   | Shared smoke, hygiene, and release packaging logic                         |
 
 ## Development
 
