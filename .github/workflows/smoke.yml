@@ -23,8 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      CODEX_REPLAY_CODEX_HOME: ${{ runner.temp }}/codex-home
-      CODEX_REPLAY_DATA_DIR: ${{ runner.temp }}/data
       NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8000/api/v1
     steps:
       - name: Checkout
@@ -54,20 +52,27 @@ jobs:
 
       - name: Start API server
         run: |
-          mkdir -p "$CODEX_REPLAY_CODEX_HOME" "$CODEX_REPLAY_DATA_DIR"
+          smoke_tmp_dir="$GITHUB_WORKSPACE/.smoke-tmp"
+          codex_home="$smoke_tmp_dir/codex-home"
+          data_dir="$smoke_tmp_dir/data"
+
+          mkdir -p "$codex_home" "$data_dir"
+          CODEX_REPLAY_CODEX_HOME="$codex_home" \
+          CODEX_REPLAY_DATA_DIR="$data_dir" \
           uv run --project services/api \
             uvicorn app.main:app \
             --app-dir services/api \
             --host 127.0.0.1 \
             --port 8000 \
-            >"$RUNNER_TEMP/api.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/api.pid"
+            >"$smoke_tmp_dir/api.log" 2>&1 &
+          echo $! > "$smoke_tmp_dir/api.pid"
 
       - name: Start web server
         run: |
+          smoke_tmp_dir="$GITHUB_WORKSPACE/.smoke-tmp"
           pnpm --filter web exec next start --hostname 127.0.0.1 --port 3000 \
-            >"$RUNNER_TEMP/web.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/web.pid"
+            >"$smoke_tmp_dir/web.log" 2>&1 &
+          echo $! > "$smoke_tmp_dir/web.pid"
 
       - name: Run smoke checks
         run: bash scripts/ci/run-smoke.sh
@@ -78,15 +83,16 @@ jobs:
         with:
           name: smoke-logs
           path: |
-            ${{ runner.temp }}/api.log
-            ${{ runner.temp }}/web.log
+            .smoke-tmp/api.log
+            .smoke-tmp/web.log
 
       - name: Stop background services
         if: always()
         run: |
-          if [[ -f "$RUNNER_TEMP/web.pid" ]]; then
-            kill "$(cat "$RUNNER_TEMP/web.pid")" || true
+          smoke_tmp_dir="$GITHUB_WORKSPACE/.smoke-tmp"
+          if [[ -f "$smoke_tmp_dir/web.pid" ]]; then
+            kill "$(cat "$smoke_tmp_dir/web.pid")" || true
           fi
-          if [[ -f "$RUNNER_TEMP/api.pid" ]]; then
-            kill "$(cat "$RUNNER_TEMP/api.pid")" || true
+          if [[ -f "$smoke_tmp_dir/api.pid" ]]; then
+            kill "$(cat "$smoke_tmp_dir/api.pid")" || true
           fi
