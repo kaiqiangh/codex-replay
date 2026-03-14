@@ -1,5 +1,4 @@
 <div align="center">
-  <img src="./.github/assets/codex-replay-hero.svg" alt="codex-replay ledger board preview" width="100%" />
   <h1>Codex Replay</h1>
   <p><strong>Replay what your coding agent actually did.</strong></p>
   <p>Local-first trace discovery, evidence-first replay, deterministic review signals, and round-trip export bundles for Codex sessions.</p>
@@ -10,6 +9,10 @@
     <a href="https://github.com/kaiqiangh/codex-replay/actions/workflows/security.yml"><img src="https://github.com/kaiqiangh/codex-replay/actions/workflows/security.yml/badge.svg" alt="Security" /></a>
     <a href="https://github.com/kaiqiangh/codex-replay/actions/workflows/release-hygiene.yml"><img src="https://github.com/kaiqiangh/codex-replay/actions/workflows/release-hygiene.yml/badge.svg" alt="Release Hygiene" /></a>
   </p>
+</div>
+
+<div align="center">
+  <img src="./.github/assets/codex-replay-hero.svg" alt="codex-replay ledger board preview" width="100%" />
 </div>
 
 ## Why It Exists
