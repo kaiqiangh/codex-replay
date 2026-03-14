@@ -1,0 +1,94 @@
+name: Smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  smoke:
+    name: Startup smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CODEX_REPLAY_CODEX_HOME: ${{ runner.temp }}/codex-home
+      CODEX_REPLAY_DATA_DIR: ${{ runner.temp }}/data
+      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8000/api/v1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync API dependencies
+        run: uv sync --project services/api --extra dev
+
+      - name: Build web app
+        run: pnpm build:web
+
+      - name: Start API server
+        run: |
+          mkdir -p "$CODEX_REPLAY_CODEX_HOME" "$CODEX_REPLAY_DATA_DIR"
+          uv run --project services/api \
+            uvicorn app.main:app \
+            --app-dir services/api \
+            --host 127.0.0.1 \
+            --port 8000 \
+            >"$RUNNER_TEMP/api.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/api.pid"
+
+      - name: Start web server
+        run: |
+          pnpm --filter web exec next start --hostname 127.0.0.1 --port 3000 \
+            >"$RUNNER_TEMP/web.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/web.pid"
+
+      - name: Run smoke checks
+        run: bash scripts/ci/run-smoke.sh
+
+      - name: Upload smoke logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs
+          path: |
+            ${{ runner.temp }}/api.log
+            ${{ runner.temp }}/web.log
+
+      - name: Stop background services
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/web.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/web.pid")" || true
+          fi
+          if [[ -f "$RUNNER_TEMP/api.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/api.pid")" || true
+          fi
