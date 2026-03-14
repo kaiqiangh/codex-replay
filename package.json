@@ -1,0 +1,21 @@
+{
+  "name": "codex-replay",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.3",
+  "scripts": {
+    "dev": "concurrently -n web,api -c cyan,magenta \"pnpm --filter web dev\" \"uv run --project services/api uvicorn app.main:app --app-dir services/api --reload --port 8000\"",
+    "dev:web": "pnpm --filter web dev",
+    "dev:api": "uv run --project services/api uvicorn app.main:app --app-dir services/api --reload --port 8000",
+    "build": "pnpm --filter web build",
+    "build:web": "pnpm --filter web build",
+    "test:api": "uv run --project services/api pytest -q",
+    "test:web": "pnpm --filter web test",
+    "typecheck": "pnpm --filter web typecheck",
+    "ci:verify": "pnpm test:api && pnpm test:web && pnpm build:web",
+    "ci:repo-hygiene": "bash scripts/ci/check-repo-hygiene.sh"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
