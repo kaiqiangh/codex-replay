@@ -221,7 +221,7 @@ def list_runs(
     if state == "ready":
         sql += " AND run_status = 'completed' AND COALESCE(is_partial, 0) = 0"
     elif state == "partial":
-        sql += " AND (run_status = 'unknown' OR COALESCE(is_partial, 0) = 1)"
+        sql += " AND run_status != 'failed' AND (run_status = 'unknown' OR COALESCE(is_partial, 0) = 1)"
     elif state == "unresolved":
         sql += " AND run_status = 'failed'"
     if q:

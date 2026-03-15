@@ -222,6 +222,48 @@ def test_diff_endpoints_return_reviewable_file_payloads(tmp_path: Path):
     assert "+ new" in diff_detail["diff_text"]
 
 
+def test_failed_runs_stay_unresolved_and_exclusive(tmp_path: Path):
+    client = setup_app(tmp_path)
+
+    bundle_bytes = io.BytesIO()
+    with zipfile.ZipFile(bundle_bytes, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr(
+            "run.json",
+            json.dumps(
+                {
+                    "provider": "codex",
+                    "provider_run_id": "run_failed_1",
+                    "session_id": "sess_failed_1",
+                    "repo_name": "demo-repo",
+                    "repo_root": "/Users/kai/dev/demo-repo",
+                    "prompt": "Investigate a failing rollout and recover it.",
+                    "run_status": "failed",
+                    "is_partial": True,
+                    "provider_version": "0.115.0-alpha.11",
+                    "started_at": "2026-03-14T11:00:00Z",
+                    "ended_at": "2026-03-14T11:05:00Z",
+                    "duration_ms": 300000,
+                }
+            ),
+        )
+        bundle.writestr("events.jsonl", "")
+
+    imported = client.post(
+        "/api/v1/imports/file",
+        files={"file": ("failed-run.zip", io.BytesIO(bundle_bytes.getvalue()), "application/zip")},
+    ).json()["data"]
+
+    partial_items = client.get("/api/v1/runs", params={"state": "partial"}).json()["data"]["items"]
+    unresolved_items = client.get("/api/v1/runs", params={"state": "unresolved"}).json()["data"]["items"]
+
+    partial_ids = {item["id"] for item in partial_items}
+    unresolved_by_id = {item["id"]: item for item in unresolved_items}
+
+    assert imported["run_id"] not in partial_ids
+    assert imported["run_id"] in unresolved_by_id
+    assert unresolved_by_id[imported["run_id"]]["state_label"] == "Unresolved replay"
+
+
 def test_manual_import_and_export_round_trip(tmp_path: Path):
     client = setup_app(tmp_path)
     upload = io.BytesIO("\n".join(json.dumps(item) for item in sample_entries()).encode("utf-8"))

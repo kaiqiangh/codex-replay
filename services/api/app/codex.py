@@ -343,12 +343,12 @@ def infer_skills(prompt: str) -> List[Tuple[str, float]]:
 
 
 def run_state_label(run_status: str, is_partial: bool) -> str:
+    if run_status == "failed":
+        return "Unresolved replay"
     if run_status == "completed" and not is_partial:
         return "Ready replay"
     if is_partial or run_status == "unknown":
         return "Partial replay"
-    if run_status == "failed":
-        return "Unresolved replay"
     return "Ready replay"
 
 
