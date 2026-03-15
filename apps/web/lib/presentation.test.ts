@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   compactArtifactName,
   compactPath,
+  isLowSignalMessage,
   matchesTimelineFilter,
   normalizeDisplayTitle,
   normalizeTimelineLabel,
@@ -89,7 +90,7 @@ Improve responsive dashboard layout`,
     expect(matchesTimelineFilter(item, "tests")).toBe(false);
   });
 
-  it("picks the first meaningful timeline event instead of the first raw prompt row", () => {
+  it("picks the first visible timeline event in chronological order", () => {
     const items = [
       {
         event_id: "evt_1",
@@ -117,7 +118,7 @@ Improve responsive dashboard layout`,
       },
     ];
 
-    expect(pickInitialTimelineEventId(items)).toBe("evt_3");
+    expect(pickInitialTimelineEventId(items)).toBe("evt_1");
   });
 
   it("truncates long message previews without returning raw prompt walls", () => {
@@ -135,5 +136,58 @@ ${"x".repeat(1200)}`,
 
     expect(preview).toContain("Improve the replay inspector");
     expect(preview.length).toBeLessThanOrEqual(120);
+  });
+
+  it("suppresses pure setup or policy boilerplate from message previews", () => {
+    const preview = previewMessageText(
+      `Filesystem sandboxing defines which files can be read or written.
+Approval policy is currently never.
+Do not provide the sandbox_permissions.
+Network access is enabled.`,
+      160,
+    );
+
+    expect(preview).toBe("");
+  });
+
+  it("drops setup noise but preserves the actual task request", () => {
+    const preview = previewMessageText(
+      `Filesystem sandboxing defines which files can be read or written.
+Approval policy is currently never.
+Improve the event ledger readability and remove mobile overflow on the review rail.`,
+      160,
+    );
+
+    expect(preview).toBe(
+      "Improve the event ledger readability and remove mobile overflow on the review rail.",
+    );
+  });
+
+  it("suppresses desktop app context bullets from the spotlight preview", () => {
+    const preview = previewMessageText(
+      `- You are running inside the Codex (desktop) app, which allows some additional features.
+- In the app, use markdown image syntax with absolute filesystem path references.
+- This app supports recurring tasks and automations are stored as TOML.`,
+      180,
+    );
+
+    expect(preview).toBe("");
+  });
+
+  it("flags instruction-heavy prompt walls as low-signal message content", () => {
+    expect(
+      isLowSignalMessage(`- Only use ::automation-update{...} when the user explicitly asks.
+- For view directives, id is required.
+- RRULE limitations apply.
+- Prompting guidance should stay concise.`),
+    ).toBe(true);
+  });
+
+  it("does not flag direct task bullets as low-signal", () => {
+    expect(
+      isLowSignalMessage(`- Improve the event ledger readability.
+- Fix the mobile overflow on the review rail.
+- Re-test the web app at 390px and 1280px.`),
+    ).toBe(false);
   });
 });

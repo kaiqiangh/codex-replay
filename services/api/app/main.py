@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from .codex import DiscoveryService, ReplayService, now_iso
+from .codex import DiscoveryService, ReplayService, now_iso, run_state_label
 from .config import get_settings
 from .database import Database, json_dump, row_to_dict, rows_to_dicts
 
@@ -204,6 +204,7 @@ def import_path(payload: Dict[str, Any]) -> Dict[str, Any]:
 def list_runs(
     provider: Optional[str] = None,
     status: Optional[str] = None,
+    state: Optional[str] = None,
     q: Optional[str] = None,
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -217,16 +218,40 @@ def list_runs(
     if status:
         sql += " AND run_status = ?"
         params.append(status)
+    if state == "ready":
+        sql += " AND run_status = 'completed' AND COALESCE(is_partial, 0) = 0"
+    elif state == "partial":
+        sql += " AND run_status != 'failed' AND (run_status = 'unknown' OR COALESCE(is_partial, 0) = 1)"
+    elif state == "unresolved":
+        sql += " AND run_status = 'failed'"
     if q:
         sql += " AND (COALESCE(repo_name, '') LIKE ? OR COALESCE(prompt, '') LIKE ? OR COALESCE(source_name, '') LIKE ?)"
         params.extend([f"%{q}%"] * 3)
-    order_by = "started_at DESC" if sort != "started_at_asc" else "started_at ASC"
+    sort_map = {
+        "started_at_desc": "started_at DESC",
+        "started_at_asc": "started_at ASC",
+        "review_attention_desc": """
+            CASE review_attention
+                WHEN 'high' THEN 0
+                WHEN 'medium' THEN 1
+                ELSE 2
+            END,
+            started_at DESC
+        """,
+        "review_attention_asc": """
+            CASE review_attention
+                WHEN 'low' THEN 0
+                WHEN 'medium' THEN 1
+                ELSE 2
+            END,
+            started_at DESC
+        """,
+    }
+    order_by = sort_map.get(sort, sort_map["started_at_desc"])
     total_row = row_to_dict(database.fetchone(f"SELECT COUNT(*) AS total FROM ({sql})", params))
     sql += f" ORDER BY {order_by} LIMIT ? OFFSET ?"
     params.extend([limit, offset])
-    items = rows_to_dicts(database.fetchall(sql, params))
-    for item in items:
-        item["status"] = item.pop("run_status")
+    items = [hydrate_run(item) for item in rows_to_dicts(database.fetchall(sql, params))]
     return response({"items": items, "total": total_row["total"] if total_row else len(items)})
 
 
@@ -237,24 +262,46 @@ def load_run(run_id: str) -> Dict[str, Any]:
     return run
 
 
+def run_state_key(run: Dict[str, Any]) -> str:
+    if run.get("run_status") == "failed":
+        return "unresolved"
+    if run.get("is_partial") or run.get("run_status") == "unknown":
+        return "partial"
+    return "ready"
+
+
+def hydrate_run(run: Dict[str, Any]) -> Dict[str, Any]:
+    counts = replay_service.get_run_counts(run["id"], run_row=run)
+    summary_payload = replay_service.build_summary_payload(run["id"], run_row=run)
+    summary_json = summary_payload["json"]
+    status = run["run_status"]
+    return {
+        **run,
+        "status": status,
+        "state_key": run_state_key(run),
+        "state_label": run_state_label(status or "unknown", bool(run.get("is_partial"))),
+        "counts": counts,
+        "summary_status": "ready" if summary_payload["markdown"] else "pending",
+        "insights_status": "ready",
+        "task_summary": summary_json["task_summary"],
+        "validation_summary": summary_json["validation_summary"],
+        "changed_files_summary": summary_json["changed_files_summary"],
+        "failure_summary": summary_json["failure_summary"],
+        "reviewer_notes": summary_json["reviewer_notes"],
+        "summary_markdown": summary_payload["markdown"],
+        "first_error_seq": counts["first_error_seq"],
+        "total_events": counts["events"],
+        "total_commands": counts["commands"],
+        "total_tests": counts["tests"],
+        "total_errors": counts["errors"],
+        "total_files_changed": counts["files_changed"],
+    }
+
+
 @app.get("/api/v1/runs/{run_id}")
 def get_run(run_id: str) -> Dict[str, Any]:
     run = load_run(run_id)
-    return response(
-        {
-            **run,
-            "status": run["run_status"],
-            "counts": {
-                "events": run["total_events"],
-                "commands": run["total_commands"],
-                "tests": run["total_tests"],
-                "errors": run["total_errors"],
-                "files_changed": run["total_files_changed"],
-            },
-            "summary_status": "ready" if run["summary_markdown"] else "pending",
-            "insights_status": "ready",
-        }
-    )
+    return response(hydrate_run(run))
 
 
 @app.delete("/api/v1/runs/{run_id}")
@@ -298,25 +345,7 @@ def get_event(run_id: str, event_id: str) -> Dict[str, Any]:
 @app.get("/api/v1/runs/{run_id}/timeline")
 def get_timeline(run_id: str) -> Dict[str, Any]:
     load_run(run_id)
-    rows = rows_to_dicts(
-        database.fetchall(
-            """
-            SELECT e.seq, e.id AS event_id, e.event_type, e.title AS label, e.status,
-                   EXISTS(SELECT 1 FROM diff_events d WHERE d.event_id = e.id) AS has_diff,
-                   EXISTS(SELECT 1 FROM error_events er WHERE er.event_id = e.id) AS has_error,
-                   EXISTS(SELECT 1 FROM skill_signals s WHERE s.event_id = e.id) AS has_skill
-            FROM events e
-            WHERE e.run_id = ?
-            ORDER BY e.seq
-            """,
-            (run_id,),
-        )
-    )
-    for row in rows:
-        row["has_diff"] = bool(row["has_diff"])
-        row["has_error"] = bool(row["has_error"])
-        row["has_skill"] = bool(row["has_skill"])
-    return response({"items": rows})
+    return response({"items": replay_service.get_visible_timeline(run_id)})
 
 
 @app.get("/api/v1/runs/{run_id}/diffs")
@@ -350,7 +379,14 @@ def get_diff(run_id: str, event_id: str) -> Dict[str, Any]:
 @app.get("/api/v1/runs/{run_id}/summary")
 def get_summary(run_id: str) -> Dict[str, Any]:
     run = load_run(run_id)
-    return response({"markdown": run["summary_markdown"] or "", "status": "ready" if run["summary_markdown"] else "pending"})
+    summary_payload = replay_service.build_summary_payload(run_id, run_row=run)
+    return response(
+        {
+            "markdown": summary_payload["markdown"],
+            "json": summary_payload["json"],
+            "status": "ready" if summary_payload["markdown"] else "pending",
+        }
+    )
 
 
 @app.get("/api/v1/runs/{run_id}/insights")
@@ -365,29 +401,7 @@ def get_insights(run_id: str) -> Dict[str, Any]:
 @app.get("/api/v1/runs/{run_id}/skills")
 def get_skills(run_id: str) -> Dict[str, Any]:
     load_run(run_id)
-    items = rows_to_dicts(
-        database.fetchall(
-            """
-            SELECT s.*, e.seq AS first_seq
-            FROM skill_signals s
-            JOIN events e ON e.id = s.event_id
-            WHERE s.run_id = ?
-            ORDER BY
-                CASE s.mode
-                    WHEN 'explicit' THEN 0
-                    WHEN 'declared' THEN 1
-                    WHEN 'implicit' THEN 2
-                    WHEN 'inferred' THEN 3
-                    ELSE 4
-                END,
-                e.seq
-            """,
-            (run_id,),
-        )
-    )
-    for item in items:
-        item["event_ids"] = json.loads(item.pop("event_ids_json"))
-    return response({"items": items})
+    return response({"items": replay_service.get_clean_skill_signals(run_id)})
 
 
 @app.post("/api/v1/runs/{run_id}/exports")
