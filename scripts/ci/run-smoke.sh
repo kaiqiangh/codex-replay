@@ -12,8 +12,8 @@ FIXTURE_PATH="$ROOT_DIR/scripts/ci/fixtures/smoke-trace.jsonl"
 
 "$ROOT_DIR/scripts/ci/assert-http.sh" "$API_BASE_URL/health" "\"status\":\"ok\""
 "$ROOT_DIR/scripts/ci/assert-http.sh" "$API_BASE_URL/ready" "\"status\":\"ready\""
-"$ROOT_DIR/scripts/ci/assert-http.sh" "$WEB_BASE_URL" "Import trace" >/dev/null
-"$ROOT_DIR/scripts/ci/assert-http.sh" "$WEB_BASE_URL/runs" "Replay catalog" >/dev/null
+"$ROOT_DIR/scripts/ci/assert-http.sh" "$WEB_BASE_URL" "Upload trace" >/dev/null
+"$ROOT_DIR/scripts/ci/assert-http.sh" "$WEB_BASE_URL/runs" "Replay queue" >/dev/null
 
 import_response="$(
   curl \
@@ -43,7 +43,7 @@ fi
 
 "$ROOT_DIR/scripts/ci/assert-http.sh" "$API_BASE_URL/runs" "$run_id" >/dev/null
 "$ROOT_DIR/scripts/ci/assert-http.sh" "$API_BASE_URL/runs/$run_id" "\"id\":\"$run_id\"" >/dev/null
-"$ROOT_DIR/scripts/ci/assert-http.sh" "$WEB_BASE_URL/runs/$run_id" "Replay inspector" >/dev/null
+"$ROOT_DIR/scripts/ci/assert-http.sh" "$WEB_BASE_URL/runs/$run_id" "Replay workspace" >/dev/null
 
 export_response="$(
   curl \
