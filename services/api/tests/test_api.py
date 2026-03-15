@@ -38,7 +38,24 @@ def sample_entries():
             "type": "event_msg",
             "payload": {
                 "type": "user_message",
-                "message": "[$frontend-design](/tmp/SKILL.md) improve the auth error state and rerun tests",
+                "message": """# AGENTS.md instructions for /Users/kai/Desktop/codex-replay
+
+<INSTRUCTIONS>
+- [$SkillName](/tmp/SKILL.md)
+- CODEX_HOME=/tmp/.codex
+- 1. not-a-skill
+</INSTRUCTIONS>
+
+[$frontend-design](/tmp/SKILL.md) improve the auth error state and rerun tests""",
+            },
+        },
+        {
+            "timestamp": "2026-03-14T10:00:02.500000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "input_tokens": 1432,
+                "output_tokens": 612,
             },
         },
         {
@@ -161,13 +178,48 @@ def test_discovery_and_run_import(tmp_path: Path):
     client = setup_app(tmp_path)
     discovery = client.get("/api/v1/discovery/sources").json()["data"]["items"]
     assert any(item["source_kind"] == "codex_trace" for item in discovery)
-    runs = client.get("/api/v1/runs").json()["data"]["items"]
+    runs_response = client.get(
+        "/api/v1/runs",
+        params={"provider": "codex", "state": "ready", "sort": "review_attention_desc"},
+    ).json()["data"]
+    runs = runs_response["items"]
     assert len(runs) == 1
     run_id = runs[0]["id"]
+    assert runs[0]["state_key"] == "ready"
+    assert runs[0]["state_label"] == "Ready replay"
     timeline = client.get(f"/api/v1/runs/{run_id}/timeline").json()["data"]["items"]
     assert any(item["has_diff"] for item in timeline)
+    assert not any(
+        item["label"] == "Unsupported event shape preserved: event_msg/token_count"
+        for item in timeline
+    )
     skills = client.get(f"/api/v1/runs/{run_id}/skills").json()["data"]["items"]
-    assert skills[0]["name"] == "frontend-design"
+    skill_names = [item["name"] for item in skills]
+    assert "frontend-design" in skill_names
+    assert "testing" in skill_names
+    assert "SkillName" not in skill_names
+    assert "CODEX_HOME" not in skill_names
+    summary = client.get(f"/api/v1/runs/{run_id}/summary").json()["data"]
+    assert summary["json"]["task_summary"] == "improve the auth error state and rerun tests"
+    assert "AGENTS.md instructions" not in summary["markdown"]
+    assert "SKILL.md" not in summary["markdown"]
+    assert "CODEX_HOME" not in summary["markdown"]
+
+
+def test_diff_endpoints_return_reviewable_file_payloads(tmp_path: Path):
+    client = setup_app(tmp_path)
+    run_id = client.get("/api/v1/runs").json()["data"]["items"][0]["id"]
+
+    diff_list = client.get(f"/api/v1/runs/{run_id}/diffs").json()["data"]["items"]
+    assert len(diff_list) == 1
+    assert diff_list[0]["file_path"] == "backend/auth.py"
+
+    diff_detail = client.get(
+        f"/api/v1/runs/{run_id}/diffs/{diff_list[0]['event_id']}"
+    ).json()["data"]
+    assert diff_detail["file_path"] == "backend/auth.py"
+    assert "- old" in diff_detail["diff_text"]
+    assert "+ new" in diff_detail["diff_text"]
 
 
 def test_manual_import_and_export_round_trip(tmp_path: Path):
