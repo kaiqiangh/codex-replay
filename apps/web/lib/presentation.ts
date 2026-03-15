@@ -37,7 +37,35 @@ const NOISE_PATTERNS = [
 ];
 
 const TIMEZONE_OR_SLASH_TOKEN = /^[A-Za-z_+-]+\/[A-Za-z0-9_+-]+$/;
-const SIGNIFICANT_EVENT_TYPES = new Set(["command", "test", "diff", "error", "tool_call"]);
+const LOW_SIGNAL_MESSAGE_PATTERNS = [
+  "approval policy",
+  "filesystem sandboxing",
+  "network access is enabled",
+  "sandbox_permissions",
+  "danger-full-access",
+  "javascript repl",
+  "environment_context",
+  "request_user_input",
+  "you are running inside the codex",
+  "markdown image syntax",
+  "absolute filesystem path",
+  "this app supports recurring tasks",
+  "automations are stored as",
+  "when to use directives",
+  "rrule limitations",
+  "required sections",
+  "performance impact",
+  "archiving rule",
+  "::automation-update",
+  "::archive",
+  "view directives",
+  "suggested update",
+  "suggested create",
+  "cwds",
+  "rrule",
+  "scheduling constraints",
+  "prompting guidance",
+];
 
 function clampText(value: string, limit: number) {
   if (value.length <= limit) {
@@ -65,6 +93,77 @@ function cleanPresentationText(value: string) {
     .replace(/[ \t]+/g, " ")
     .replace(/\s*\n\s*/g, "\n")
     .trim();
+}
+
+function isLowSignalMessageLine(line: string) {
+  const lowered = line.toLowerCase();
+  if (!line) {
+    return true;
+  }
+  if (/^#+\s+/.test(line)) {
+    return true;
+  }
+  if (TIMEZONE_OR_SLASH_TOKEN.test(line)) {
+    return true;
+  }
+  if (/^(cwd|shell|timezone|current_date)\b/i.test(line)) {
+    return true;
+  }
+  if (/^(use this skill|this skill should be used|if a named skill)\b/i.test(line)) {
+    return true;
+  }
+  if (/^(approval policy|filesystem sandboxing|network access is enabled)\b/i.test(line)) {
+    return true;
+  }
+  if (/^[-*]\s*(use|description|license|metadata|args)\b/i.test(line)) {
+    return true;
+  }
+  if (/^[-*]\s*[\w/-]+:\s/.test(line)) {
+    return true;
+  }
+  if (/^[-*]\s+/.test(line)) {
+    const instructionHeavy = /\b(always|never|use|when|return|include|avoid|default|must|should|if)\b/i.test(
+      line,
+    );
+    const taskHeavy = /\b(implement|improve|fix|review|build|design|add|remove|trace|ledger|replay|run|home|ui|ux|page|mobile|overflow|layout|test)\b/i.test(
+      line,
+    );
+    if (instructionHeavy && !taskHeavy) {
+      return true;
+    }
+  }
+  if (!line.includes(" ") && line.length > 32) {
+    return true;
+  }
+  return LOW_SIGNAL_MESSAGE_PATTERNS.some((pattern) => lowered.includes(pattern));
+}
+
+export function isLowSignalMessage(value: string | null | undefined) {
+  if (!value) {
+    return false;
+  }
+  const cleaned = cleanPresentationText(value).replace(/\n{3,}/g, "\n\n").trim();
+  if (!cleaned) {
+    return false;
+  }
+  const lines = cleaned
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    return false;
+  }
+  const lowSignalLines = lines.filter((line) => isLowSignalMessageLine(line)).length;
+  const bulletLines = lines.filter((line) => /^[-*]\s+/.test(line)).length;
+  const policyLines = lines.filter((line) =>
+    /\b(always|never|when|return|include|avoid|default|must|should|only|for|do not|if)\b/i.test(
+      line,
+    ),
+  ).length;
+  return (
+    lowSignalLines >= Math.max(3, Math.ceil(lines.length * 0.6)) ||
+    (lines.length >= 5 && bulletLines >= 4 && policyLines >= Math.ceil(lines.length * 0.4))
+  );
 }
 
 function scoreCandidate(line: string) {
@@ -261,39 +360,24 @@ export function pickInitialTimelineEventId(items: TimelineLike[]) {
   if (!items.length) {
     return null;
   }
-
-  const firstEvidence = items.find((item) => {
-    if (item.has_error || item.has_diff) {
-      return true;
-    }
-    if (SIGNIFICANT_EVENT_TYPES.has(item.event_type)) {
-      return true;
-    }
-    return false;
-  });
-
-  if (firstEvidence) {
-    return firstEvidence.event_id;
-  }
-
-  const firstMeaningfulNarrative = items.find((item) => {
-    if (item.event_type === "summary") {
-      return true;
-    }
-    if (item.event_type === "message") {
-      const normalized = normalizeTimelineLabel(item.label, item.event_type);
-      return normalized !== "User note";
-    }
-    return false;
-  });
-
-  return firstMeaningfulNarrative?.event_id ?? items[0].event_id;
+  return items[0].event_id;
 }
 
 export function previewMessageText(value: string, limit = 900) {
   const cleaned = cleanPresentationText(value).replace(/\n{3,}/g, "\n\n").trim();
-  if (cleaned.length <= limit) {
-    return cleaned;
+  const signal = cleaned
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !isLowSignalMessageLine(line))
+    .join("\n")
+    .trim();
+
+  if (!signal) {
+    return "";
   }
-  return `${cleaned.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+  if (signal.length <= limit) {
+    return signal;
+  }
+  return `${signal.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
 }
