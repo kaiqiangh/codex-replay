@@ -150,12 +150,182 @@ def normalize_path(path_value: Optional[str]) -> str:
     return path_value.replace("\\", "/")
 
 
+BOOKKEEPING_PROVIDER_TYPES = {
+    "event_msg:token_count",
+    "response_item:reasoning",
+    "response_item:token_count",
+}
+
+SUMMARY_NOISE_PATTERNS = [
+    "AGENTS.md instructions",
+    "<INSTRUCTIONS>",
+    "</INSTRUCTIONS>",
+    "<environment_context>",
+    "</environment_context>",
+    "## Skills",
+    "### Available skills",
+    "### How to use skills",
+    "JavaScript REPL (Node)",
+    "Top-level bindings persist across cells",
+    "If a cell throws",
+    "codex.emitImage",
+    "import.meta.resolve",
+    "view_image",
+    "js_repl",
+    "current_date",
+    "timezone",
+    "request_user_input",
+]
+
+SUMMARY_NOISE_WORDS = {
+    "skill",
+    "skills",
+    "instruction",
+    "instructions",
+    "environment",
+    "timezone",
+    "current_date",
+    "cwd",
+    "shell",
+    "path",
+    "policy",
+    "license",
+    "metadata",
+    "binding",
+    "bindings",
+    "kernel",
+}
+
+SKILL_BLOCKLIST = {
+    "codex_home",
+    "skillname",
+    "request_user_input",
+    "current_date",
+    "timezone",
+}
+
+MODE_RANK = {
+    "explicit": 0,
+    "declared": 1,
+    "implicit": 2,
+    "inferred": 3,
+}
+
+
+def is_parser_diagnostic_provider_type(provider_event_type: Optional[str]) -> bool:
+    return (provider_event_type or "") in BOOKKEEPING_PROVIDER_TYPES
+
+
+def clean_summary_text(value: str) -> str:
+    return (
+        value.replace("\r", "\n")
+        .replace("`", "")
+        .replace("$", " ")
+        .replace("\t", " ")
+        .replace("/Users/", " /Users/")
+        .strip()
+    )
+
+
+def score_summary_candidate(line: str) -> int:
+    lowered = line.lower()
+    score = 0
+    if re.search(r"\b(implement|improve|fix|review|add|build|design|audit|continue|rewrite|reset)\b", lowered):
+        score += 40
+    if re.search(r"\b(replay|trace|run|ux|ui|catalog|inspector|landing|home|event|ledger)\b", lowered):
+        score += 22
+    if 16 <= len(line) <= 140:
+        score += 18
+    if 4 <= len(line.split()) <= 18:
+        score += 12
+    if line.startswith("PLEASE IMPLEMENT THIS PLAN"):
+        score -= 10
+    if line.startswith(("-", "*", "#")):
+        score -= 6
+    if re.match(r"^\d+[.)]\s+", line):
+        score -= 8
+    if any(pattern.lower() in lowered for pattern in SUMMARY_NOISE_PATTERNS):
+        score -= 50
+    if any(word in lowered for word in SUMMARY_NOISE_WORDS):
+        score -= 18
+    if "/Users/" in line or "SKILL.md" in line or "(file:" in lowered:
+        score -= 28
+    if "<" in line and ">" in line:
+        score -= 18
+    return score
+
+
+def derive_task_summary(value: Optional[str], fallback: str) -> str:
+    raw = clean_summary_text(value or "")
+    candidates = []
+    for line in raw.splitlines():
+        stripped = " ".join(line.strip().split())
+        if not stripped:
+            continue
+        stripped = re.sub(r"\[\s*\$?([A-Za-z0-9_.\-]+)\s*\]\([^)]+SKILL\.md\)", " ", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"^\[(.+?)\]\([^)]+\)$", r"\1", stripped)
+        stripped = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", stripped)
+        stripped = re.sub(r"\$[A-Za-z0-9_.\-]+", " ", stripped)
+        stripped = re.sub(r"</?[^>]+>", " ", stripped)
+        stripped = " ".join(stripped.split())
+        if not stripped:
+            continue
+        candidates.append((score_summary_candidate(stripped), stripped))
+    if candidates:
+        best_score, best_line = max(candidates, key=lambda item: item[0])
+        if best_score > 8:
+            best_line = re.sub(r"^PLEASE IMPLEMENT THIS PLAN:\s*", "", best_line, flags=re.IGNORECASE).strip()
+            if len(best_line) > 96:
+                best_line = best_line[:95].rstrip() + "…"
+            return best_line
+    return fallback
+
+
+def normalize_skill_name(name: str) -> Optional[str]:
+    cleaned = name.strip()
+    if not cleaned or cleaned.isdigit():
+        return None
+    lowered = cleaned.lower()
+    if lowered in SKILL_BLOCKLIST:
+        return None
+    if cleaned.upper() == cleaned and any(char.isalpha() for char in cleaned):
+        return None
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.\-]{0,63}", cleaned):
+        return None
+    return lowered
+
+
+def collapse_skills(skills: List[ParsedSkill]) -> List[ParsedSkill]:
+    merged: Dict[str, ParsedSkill] = {}
+    for skill in skills:
+        normalized_name = normalize_skill_name(skill.name)
+        if not normalized_name:
+            continue
+        skill.name = normalized_name
+        skill.event_ids = list(dict.fromkeys([skill.event_id, *skill.event_ids]))
+        existing = merged.get(normalized_name)
+        if not existing:
+            merged[normalized_name] = skill
+            continue
+        existing.event_ids = list(dict.fromkeys([*existing.event_ids, *skill.event_ids]))
+        if skill.confidence > existing.confidence:
+            existing.confidence = skill.confidence
+        if MODE_RANK.get(skill.mode, 99) < MODE_RANK.get(existing.mode, 99):
+            existing.mode = skill.mode
+            existing.evidence_source = skill.evidence_source
+            existing.event_id = skill.event_id
+    return list(merged.values())
+
+
 def extract_skill_names(text: str) -> List[str]:
-    names = re.findall(r"\[\$([A-Za-z0-9_.\-]+)\]\(", text)
-    if names:
-        return sorted(set(names))
-    fallback = re.findall(r"\$([A-Za-z0-9_.\-]+)", text)
-    return sorted(set(fallback))
+    candidates = re.findall(r"\[\$([A-Za-z0-9_.\-]+)\]\(", text)
+    candidates.extend(re.findall(r"\$([A-Za-z0-9_.\-]+)", text))
+    names = []
+    for candidate in candidates:
+        normalized = normalize_skill_name(candidate)
+        if normalized:
+            names.append(normalized)
+    return sorted(set(names))
 
 
 def infer_skills(prompt: str) -> List[Tuple[str, float]]:
@@ -170,6 +340,26 @@ def infer_skills(prompt: str) -> List[Tuple[str, float]]:
     if any(word in lowered for word in ["test", "pytest", "failing"]):
         inferred.append(("testing", 0.5))
     return inferred
+
+
+def run_state_label(run_status: str, is_partial: bool) -> str:
+    if run_status == "completed" and not is_partial:
+        return "Ready replay"
+    if is_partial or run_status == "unknown":
+        return "Partial replay"
+    if run_status == "failed":
+        return "Unresolved replay"
+    return "Ready replay"
+
+
+def is_actionable_error_event(event: ParsedEvent) -> bool:
+    if not (event.status == "error" or event.error):
+        return False
+    if is_parser_diagnostic_provider_type(event.provider_event_type):
+        return False
+    if event.error and event.error.get("error_code") == "unsupported_event":
+        return False
+    return True
 
 
 def parse_test_counts(output: str) -> Tuple[Optional[int], Optional[int], Optional[int], str]:
@@ -341,6 +531,9 @@ class CodexParser:
             if outer_type == "event_msg" and inner_type == "task_complete":
                 run_status = "completed"
                 is_partial = False
+                continue
+
+            if outer_type == "event_msg" and inner_type == "token_count":
                 continue
 
             if outer_type == "event_msg" and inner_type == "task_started":
@@ -640,7 +833,7 @@ class CodexParser:
             duration_ms=duration_ms(session_meta.get("timestamp") or first_timestamp, last_timestamp if run_status == "completed" else None),
             warnings=warnings,
             events=events,
-            skills=list(skills.values()),
+            skills=collapse_skills(list(skills.values())),
         )
 
 
@@ -651,7 +844,7 @@ class InsightEngine:
         unique_files = sorted({path for path in changed_files if path})
         tests = [event for event in parsed.events if event.test]
         commands = [event for event in parsed.events if event.command]
-        errors = [event for event in parsed.events if event.status == "error" or event.error]
+        errors = [event for event in parsed.events if is_actionable_error_event(event)]
         review_attention = "low"
 
         retry_groups = Counter(
@@ -697,29 +890,46 @@ class InsightEngine:
         }
 
     def _summary(self, parsed: ParsedRun, files: List[str], tests: List[ParsedEvent], errors: List[ParsedEvent], review_attention: str) -> Dict[str, Any]:
+        task_summary = derive_task_summary(parsed.prompt or parsed.source_name, parsed.source_name or "Imported run")
         validation_bits = []
         for test in tests[:3]:
             result = test.test.get("result") if test.test else "unknown"
             validation_bits.append(f"`{test.test.get('command_text')}`: {result}")
-        validation_summary = ", ".join(validation_bits) if validation_bits else "No validation commands were detected."
+        validation_summary = ", ".join(validation_bits) if validation_bits else "No validation commands were recorded."
         changed_summary = ", ".join(files[:5]) if files else "No file diffs were captured."
-        failure_summary = "Recovered after errors." if errors and any(test.test and test.test.get("result") == "passed" for test in tests) else "No recovery evidence." if errors else "No recorded errors."
-        reviewer_notes = "Review focus should stay on the first failing step, the final patch, and the last validation command."
+        has_recovery = any(test.test and test.test.get("result") == "passed" for test in tests)
+        if errors and has_recovery:
+            failure_summary = "Recovered after earlier failures."
+        elif errors and parsed.run_status != "completed":
+            failure_summary = "Run ended before recovery was shown."
+        elif errors:
+            failure_summary = "Failures were recorded without a confirmed recovery."
+        else:
+            failure_summary = "No actionable failures were recorded."
+        if errors:
+            reviewer_notes = "Start with the first failing step, compare the last patch, and verify the final validation coverage."
+        elif len(files) >= 4 and not tests:
+            reviewer_notes = "Review the blast radius carefully because the run changed several files without recorded validation."
+        else:
+            reviewer_notes = "Review the main command sequence, the final patch, and the last recorded validation step."
         markdown = "\n".join(
             [
-                "## Session summary",
-                f"- Prompt: {parsed.prompt or 'Unavailable'}",
-                f"- Status: {parsed.run_status}",
-                f"- Review attention: {review_attention}",
+                "## Run overview",
+                f"- Task: {task_summary}",
+                f"- State: {run_state_label(parsed.run_status, parsed.is_partial)}",
+                f"- Review priority: {review_attention}",
                 f"- Files changed: {len(files)}",
                 f"- Validation: {validation_summary}",
-                f"- Failure/recovery: {failure_summary}",
+                f"- Recovery: {failure_summary}",
+                "",
+                "## What to review",
+                f"- {reviewer_notes}",
             ]
         )
         return {
             "markdown": markdown,
             "json": {
-                "task_summary": parsed.prompt or parsed.source_name,
+                "task_summary": task_summary,
                 "validation_summary": validation_summary,
                 "changed_files_summary": changed_summary,
                 "failure_summary": failure_summary,
@@ -960,6 +1170,267 @@ class ReplayService:
             skill.event_id = mapping.get(skill.event_id, skill.event_id)
             skill.event_ids = [mapping.get(event_id, event_id) for event_id in skill.event_ids]
 
+    def get_clean_skill_signals(self, run_id: str) -> List[Dict[str, Any]]:
+        raw_items = rows_to_dicts(
+            self.database.fetchall("SELECT * FROM skill_signals WHERE run_id = ?", (run_id,))
+        )
+        seq_by_event_id = {
+            row["id"]: row["seq"]
+            for row in rows_to_dicts(
+                self.database.fetchall("SELECT id, seq FROM events WHERE run_id = ?", (run_id,))
+            )
+        }
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for item in raw_items:
+            normalized_name = normalize_skill_name(item["name"])
+            if not normalized_name:
+                continue
+            event_ids = [
+                event_id
+                for event_id in json.loads(item["event_ids_json"])
+                if event_id in seq_by_event_id
+            ]
+            primary_event_id = item["event_id"] if item["event_id"] in seq_by_event_id else None
+            if primary_event_id:
+                event_ids.insert(0, primary_event_id)
+            ordered_event_ids = list(
+                dict.fromkeys(sorted(event_ids, key=lambda event_id: seq_by_event_id[event_id]))
+            )
+            if not ordered_event_ids:
+                continue
+            merged = grouped.get(normalized_name)
+            first_seq = seq_by_event_id[ordered_event_ids[0]]
+            if not merged:
+                grouped[normalized_name] = {
+                    **item,
+                    "name": normalized_name,
+                    "event_id": ordered_event_ids[0],
+                    "event_ids": ordered_event_ids,
+                    "first_seq": first_seq,
+                }
+                continue
+            merged["event_ids"] = list(
+                dict.fromkeys(
+                    sorted(
+                        [*merged["event_ids"], *ordered_event_ids],
+                        key=lambda event_id: seq_by_event_id[event_id],
+                    )
+                )
+            )
+            merged["event_id"] = merged["event_ids"][0]
+            merged["first_seq"] = seq_by_event_id[merged["event_id"]]
+            if float(item["confidence"]) > float(merged["confidence"]):
+                merged["confidence"] = item["confidence"]
+            if MODE_RANK.get(item["mode"], 99) < MODE_RANK.get(merged["mode"], 99):
+                merged["mode"] = item["mode"]
+                merged["evidence_source"] = item.get("evidence_source")
+        return sorted(
+            grouped.values(),
+            key=lambda item: (
+                MODE_RANK.get(item["mode"], 99),
+                item["first_seq"],
+                item["name"],
+            ),
+        )
+
+    def get_visible_timeline(self, run_id: str) -> List[Dict[str, Any]]:
+        events = rows_to_dicts(
+            self.database.fetchall(
+                """
+                SELECT id, seq, event_type, title, status, provider_event_type
+                FROM events
+                WHERE run_id = ?
+                ORDER BY seq
+                """,
+                (run_id,),
+            )
+        )
+        diff_ids = {
+            row["event_id"]
+            for row in rows_to_dicts(
+                self.database.fetchall(
+                    """
+                    SELECT d.event_id
+                    FROM diff_events d
+                    JOIN events e ON e.id = d.event_id
+                    WHERE e.run_id = ?
+                    """,
+                    (run_id,),
+                )
+            )
+        }
+        error_rows = {
+            row["event_id"]: row
+            for row in rows_to_dicts(
+                self.database.fetchall(
+                    """
+                    SELECT er.*, e.provider_event_type, e.status
+                    FROM error_events er
+                    JOIN events e ON e.id = er.event_id
+                    WHERE e.run_id = ?
+                    """,
+                    (run_id,),
+                )
+            )
+        }
+        skill_event_ids = {
+            event_id
+            for skill in self.get_clean_skill_signals(run_id)
+            for event_id in skill["event_ids"]
+        }
+        items: List[Dict[str, Any]] = []
+        for event in events:
+            error = error_rows.get(event["id"])
+            is_diagnostic = is_parser_diagnostic_provider_type(
+                event.get("provider_event_type")
+            ) or (error and error.get("error_code") == "unsupported_event")
+            if is_diagnostic:
+                continue
+            has_error = bool(error) or event.get("status") == "error"
+            items.append(
+                {
+                    "seq": event["seq"],
+                    "event_id": event["id"],
+                    "event_type": event["event_type"],
+                    "label": event["title"],
+                    "status": event["status"],
+                    "has_diff": event["id"] in diff_ids,
+                    "has_error": has_error,
+                    "has_skill": event["id"] in skill_event_ids,
+                }
+            )
+        return items
+
+    def get_run_counts(self, run_id: str, run_row: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        events = rows_to_dicts(
+            self.database.fetchall("SELECT id FROM events WHERE run_id = ?", (run_id,))
+        )
+        timeline = self.get_visible_timeline(run_id)
+        diff_rows = rows_to_dicts(
+            self.database.fetchall(
+                """
+                SELECT d.normalized_path
+                FROM diff_events d
+                JOIN events e ON e.id = d.event_id
+                WHERE e.run_id = ?
+                """,
+                (run_id,),
+            )
+        )
+        unique_files = {row["normalized_path"] for row in diff_rows if row["normalized_path"]}
+        return {
+            "events": len(timeline),
+            "commands": sum(1 for item in timeline if item["event_type"] == "command"),
+            "tests": sum(1 for item in timeline if item["event_type"] == "test"),
+            "errors": sum(1 for item in timeline if item["has_error"]),
+            "files_changed": len(unique_files) if unique_files else (run_row or {}).get("total_files_changed", 0),
+            "first_error_seq": next(
+                (item["seq"] for item in timeline if item["has_error"]),
+                None,
+            ),
+            "diagnostics": max(len(events) - len(timeline), 0),
+        }
+
+    def build_summary_payload(
+        self, run_id: str, run_row: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        run = run_row or row_to_dict(
+            self.database.fetchone("SELECT * FROM runs WHERE id = ?", (run_id,))
+        )
+        if not run:
+            raise FileNotFoundError(run_id)
+        tests = rows_to_dicts(
+            self.database.fetchall(
+                """
+                SELECT t.command_text, t.result, e.seq
+                FROM test_events t
+                JOIN events e ON e.id = t.event_id
+                WHERE e.run_id = ?
+                ORDER BY e.seq
+                """,
+                (run_id,),
+            )
+        )
+        diff_rows = rows_to_dicts(
+            self.database.fetchall(
+                """
+                SELECT d.normalized_path
+                FROM diff_events d
+                JOIN events e ON e.id = d.event_id
+                WHERE e.run_id = ?
+                ORDER BY e.seq
+                """,
+                (run_id,),
+            )
+        )
+        error_rows = rows_to_dicts(
+            self.database.fetchall(
+                """
+                SELECT er.error_code, e.provider_event_type
+                FROM error_events er
+                JOIN events e ON e.id = er.event_id
+                WHERE e.run_id = ?
+                ORDER BY e.seq
+                """,
+                (run_id,),
+            )
+        )
+        actionable_errors = [
+            row
+            for row in error_rows
+            if not is_parser_diagnostic_provider_type(row.get("provider_event_type"))
+            and row.get("error_code") != "unsupported_event"
+        ]
+        task_summary = derive_task_summary(
+            run.get("prompt") or run.get("source_name"),
+            run.get("session_title") or run.get("source_name") or "Imported run",
+        )
+        unique_files = sorted(
+            {row["normalized_path"] for row in diff_rows if row["normalized_path"]}
+        )
+        validation_bits = []
+        for test in tests[:3]:
+            validation_bits.append(f"`{test['command_text']}`: {test['result'] or 'unknown'}")
+        validation_summary = ", ".join(validation_bits) if validation_bits else "No validation commands were recorded."
+        if actionable_errors and any(test.get("result") == "passed" for test in tests):
+            failure_summary = "Recovered after earlier failures."
+        elif actionable_errors and (run.get("is_partial") or run.get("run_status") != "completed"):
+            failure_summary = "Run ended before recovery was shown."
+        elif actionable_errors:
+            failure_summary = "Failures were recorded without a confirmed recovery."
+        else:
+            failure_summary = "No actionable failures were recorded."
+        if actionable_errors:
+            reviewer_notes = "Start with the first failing step, compare the last patch, and verify the final validation coverage."
+        elif len(unique_files) >= 4 and not tests:
+            reviewer_notes = "Review the blast radius carefully because the run changed several files without recorded validation."
+        else:
+            reviewer_notes = "Review the main command sequence, the final patch, and the last recorded validation step."
+        markdown = "\n".join(
+            [
+                "## Run overview",
+                f"- Task: {task_summary}",
+                f"- State: {run_state_label(run.get('run_status') or 'unknown', bool(run.get('is_partial')))}",
+                f"- Review priority: {run.get('review_attention') or 'low'}",
+                f"- Files changed: {len(unique_files)}",
+                f"- Validation: {validation_summary}",
+                f"- Recovery: {failure_summary}",
+                "",
+                "## What to review",
+                f"- {reviewer_notes}",
+            ]
+        )
+        return {
+            "markdown": markdown,
+            "json": {
+                "task_summary": task_summary,
+                "validation_summary": validation_summary,
+                "changed_files_summary": ", ".join(unique_files[:5]) if unique_files else "No file diffs were captured.",
+                "failure_summary": failure_summary,
+                "reviewer_notes": reviewer_notes,
+            },
+        }
+
     def delete_run(self, run_id: str) -> None:
         artifacts = rows_to_dicts(self.database.fetchall("SELECT storage_path FROM artifacts WHERE run_id = ?", (run_id,)))
         self.database.execute("DELETE FROM runs WHERE id = ?", (run_id,))
@@ -986,9 +1457,10 @@ class ReplayService:
         if not run:
             raise FileNotFoundError(run_id)
         events = rows_to_dicts(self.database.fetchall("SELECT * FROM events WHERE run_id = ? ORDER BY seq", (run_id,)))
-        skills = rows_to_dicts(self.database.fetchall("SELECT * FROM skill_signals WHERE run_id = ?", (run_id,)))
+        skills = self.get_clean_skill_signals(run_id)
         insights = rows_to_dicts(self.database.fetchall("SELECT * FROM insights WHERE run_id = ?", (run_id,)))
         artifacts = rows_to_dicts(self.database.fetchall("SELECT * FROM artifacts WHERE run_id = ?", (run_id,)))
+        summary_payload = self.build_summary_payload(run_id, run_row=run)
         export_id = make_id("exp")
         export_path = self.settings.export_dir / f"{export_id}.zip"
         checksums: Dict[str, str] = {}
@@ -1025,7 +1497,7 @@ class ReplayService:
             files = {
                 "run.json": json.dumps(run_payload, ensure_ascii=True, indent=2),
                 "events.jsonl": "\n".join(event_payload_lines),
-                "summary.md": run["summary_markdown"] or "",
+                "summary.md": summary_payload["markdown"],
                 "insights.json": json.dumps([
                     {
                         "code": item["code"],
@@ -1043,7 +1515,7 @@ class ReplayService:
                         "name": item["name"],
                         "mode": item["mode"],
                         "confidence": item["confidence"],
-                        "event_ids": json.loads(item["event_ids_json"]),
+                        "event_ids": item["event_ids"],
                         "evidence_source": item["evidence_source"],
                     }
                     for item in skills
